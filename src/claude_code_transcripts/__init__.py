@@ -183,6 +183,69 @@ def find_local_sessions(folder, limit=10):
     return results[:limit]
 
 
+def find_cowork_sessions(base_dir=None, limit=10):
+    """Find recent Cowork session JSONL files.
+
+    Reads session metadata from ~/Library/Application Support/Claude/local-agent-mode-sessions/
+    and locates the corresponding JSONL transcript files.
+
+    Returns a list of dicts sorted by lastActivityAt descending, limited to `limit`.
+    Each dict has: title, jsonl_path, folders, mtime.
+    """
+    if base_dir is None:
+        base_dir = (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Claude"
+            / "local-agent-mode-sessions"
+        )
+    base_dir = Path(base_dir)
+    if not base_dir.exists():
+        return []
+
+    results = []
+    for metadata_file in base_dir.glob("**/local_*.json"):
+        if not metadata_file.is_file():
+            continue
+        try:
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        process_name = metadata.get("processName", "")
+        cli_session_id = metadata.get("cliSessionId", "")
+        title = metadata.get("title") or metadata.get("initialMessage", "(untitled)")
+        folders = metadata.get("userSelectedFolders", [])
+        last_activity_at = metadata.get("lastActivityAt", 0)
+
+        # Construct JSONL path
+        stem = metadata_file.stem  # e.g. "local_sess-789"
+        jsonl_path = (
+            metadata_file.parent
+            / stem
+            / ".claude"
+            / "projects"
+            / f"-sessions-{process_name}"
+            / f"{cli_session_id}.jsonl"
+        )
+
+        if not jsonl_path.exists():
+            continue
+
+        results.append(
+            {
+                "title": title,
+                "jsonl_path": jsonl_path,
+                "folders": folders,
+                "mtime": last_activity_at / 1000,
+            }
+        )
+
+    results.sort(key=lambda x: x["mtime"], reverse=True)
+    return results[:limit]
+
+
 def get_project_display_name(folder_name):
     """Convert encoded folder name to readable project name.
 
@@ -1582,6 +1645,96 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
 
     if gist:
         # Inject gist preview JS and create gist
+        inject_gist_preview_js(output)
+        click.echo("Creating GitHub gist...")
+        gist_id, gist_url = create_gist(output)
+        preview_url = f"https://gisthost.github.io/?{gist_id}/index.html"
+        click.echo(f"Gist: {gist_url}")
+        click.echo(f"Preview: {preview_url}")
+
+    if open_browser or auto_open:
+        index_url = (output / "index.html").resolve().as_uri()
+        webbrowser.open(index_url)
+
+
+@cli.command("cowork")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(),
+    help="Output directory. If not specified, writes to temp dir and opens in browser.",
+)
+@click.option(
+    "-a",
+    "--output-auto",
+    is_flag=True,
+    help="Auto-name output subdirectory based on session filename (uses -o as parent, or current dir).",
+)
+@click.option(
+    "--gist",
+    is_flag=True,
+    help="Upload to GitHub Gist and output a gisthost.github.io URL.",
+)
+@click.option(
+    "--open",
+    "open_browser",
+    is_flag=True,
+    help="Open the generated index.html in your default browser (default if no -o specified).",
+)
+@click.option(
+    "--limit",
+    default=10,
+    help="Maximum number of sessions to show (default: 10)",
+)
+def cowork_cmd(output, output_auto, gist, open_browser, limit):
+    """Select and convert a local Claude Cowork session to HTML."""
+    click.echo("Loading Cowork sessions...")
+    sessions = find_cowork_sessions(limit=limit)
+
+    if not sessions:
+        click.echo("No Cowork sessions found.")
+        click.echo(
+            "Expected sessions in: ~/Library/Application Support/Claude/local-agent-mode-sessions/"
+        )
+        return
+
+    # Build choices for questionary
+    choices = []
+    for session in sessions:
+        mod_time = datetime.fromtimestamp(session["mtime"])
+        date_str = mod_time.strftime("%Y-%m-%d %H:%M")
+        title = session["title"]
+        if len(title) > 50:
+            title = title[:47] + "..."
+        folder = session["folders"][0] if session["folders"] else "(no folder)"
+        display = f"{title:50}  {date_str}  {folder}"
+        choices.append(questionary.Choice(title=display, value=session))
+
+    selected = questionary.select(
+        "Select a session to convert:",
+        choices=choices,
+    ).ask()
+
+    if selected is None:
+        click.echo("No session selected.")
+        return
+
+    session_file = selected["jsonl_path"]
+
+    # Determine output directory and whether to open browser
+    auto_open = output is None and not gist and not output_auto
+    if output_auto:
+        parent_dir = Path(output) if output else Path(".")
+        output = parent_dir / session_file.stem
+    elif output is None:
+        output = Path(tempfile.gettempdir()) / f"claude-cowork-{session_file.stem}"
+
+    output = Path(output)
+    generate_html(session_file, output)
+
+    click.echo(f"Output: {output.resolve()}")
+
+    if gist:
         inject_gist_preview_js(output)
         click.echo("Creating GitHub gist...")
         gist_id, gist_url = create_gist(output)
