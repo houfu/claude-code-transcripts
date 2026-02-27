@@ -5,7 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from claude_code_transcripts import find_cowork_sessions, parse_session_file
+from unittest.mock import patch
+
+from click.testing import CliRunner
+
+from claude_code_transcripts import (
+    cli,
+    find_cowork_session_by_process_name,
+    find_cowork_sessions,
+    parse_session_file,
+)
 
 
 def make_cowork_session(
@@ -171,3 +180,85 @@ def test_cowork_jsonl_parses_with_queue_operation(tmp_path):
     assert loglines[1]["type"] == "assistant"
     # Content should be correct
     assert loglines[0]["message"]["content"] == "Hello cowork"
+
+
+def test_find_cowork_session_by_process_name_found(tmp_path):
+    """Finds the session matching a given processName."""
+    make_cowork_session(
+        tmp_path,
+        process_name="quirky-eager-fermat",
+        title="Target Session",
+    )
+    make_cowork_session(
+        tmp_path,
+        session_uuid="other-session",
+        process_name="other-process",
+        cli_session_id="other-cli",
+        title="Other Session",
+    )
+
+    result = find_cowork_session_by_process_name(
+        "quirky-eager-fermat", base_dir=tmp_path
+    )
+
+    assert result is not None
+    assert result["title"] == "Target Session"
+    assert result["jsonl_path"].exists()
+
+
+def test_find_cowork_session_by_process_name_not_found(tmp_path):
+    """Returns None when no session matches the processName."""
+    make_cowork_session(tmp_path, process_name="some-other-process")
+
+    result = find_cowork_session_by_process_name("no-such-process", base_dir=tmp_path)
+
+    assert result is None
+
+
+def test_cowork_process_name_flag_converts_without_picker(tmp_path):
+    """--process-name skips the picker and converts the matching session."""
+    _, jsonl_file = make_cowork_session(
+        tmp_path,
+        process_name="quirky-eager-fermat",
+        cli_session_id="cli-abc",
+        title="My Cowork Session",
+    )
+    output_dir = tmp_path / "output"
+
+    runner = CliRunner()
+    with (
+        patch(
+            "claude_code_transcripts.find_cowork_session_by_process_name"
+        ) as mock_find,
+        patch("claude_code_transcripts.generate_html") as mock_gen,
+    ):
+        mock_find.return_value = {
+            "title": "My Cowork Session",
+            "jsonl_path": jsonl_file,
+            "folders": [],
+            "mtime": 1700000000.0,
+        }
+        result = runner.invoke(
+            cli,
+            ["cowork", "--process-name", "quirky-eager-fermat", "-o", str(output_dir)],
+        )
+
+    assert result.exit_code == 0
+    mock_find.assert_called_once_with("quirky-eager-fermat")
+    mock_gen.assert_called_once()
+
+
+def test_cowork_process_name_not_found_exits_cleanly(tmp_path):
+    """--process-name with no match exits with a clear message."""
+    runner = CliRunner()
+    with patch(
+        "claude_code_transcripts.find_cowork_session_by_process_name"
+    ) as mock_find:
+        mock_find.return_value = None
+        result = runner.invoke(
+            cli,
+            ["cowork", "--process-name", "no-such-process"],
+        )
+
+    assert result.exit_code == 0
+    assert "no-such-process" in result.output
