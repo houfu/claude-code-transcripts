@@ -246,63 +246,6 @@ def find_cowork_sessions(base_dir=None, limit=10):
     return results[:limit]
 
 
-def find_cowork_session_by_process_name(process_name, base_dir=None):
-    """Find a single Cowork session by its processName.
-
-    Returns a session dict (title, jsonl_path, folders, mtime) or None if not found.
-    Useful for non-interactive in-session use: pass basename of $PWD as process_name.
-    """
-    if base_dir is None:
-        base_dir = (
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "Claude"
-            / "local-agent-mode-sessions"
-        )
-    base_dir = Path(base_dir)
-    if not base_dir.exists():
-        return None
-
-    for metadata_file in base_dir.glob("**/local_*.json"):
-        if not metadata_file.is_file():
-            continue
-        try:
-            metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-
-        if metadata.get("processName") != process_name:
-            continue
-
-        cli_session_id = metadata.get("cliSessionId", "")
-        title = metadata.get("title") or metadata.get("initialMessage", "(untitled)")
-        folders = metadata.get("userSelectedFolders", [])
-        last_activity_at = metadata.get("lastActivityAt", 0)
-
-        stem = metadata_file.stem
-        jsonl_path = (
-            metadata_file.parent
-            / stem
-            / ".claude"
-            / "projects"
-            / f"-sessions-{process_name}"
-            / f"{cli_session_id}.jsonl"
-        )
-
-        if not jsonl_path.exists():
-            return None
-
-        return {
-            "title": title,
-            "jsonl_path": jsonl_path,
-            "folders": folders,
-            "mtime": last_activity_at / 1000,
-        }
-
-    return None
-
-
 def get_project_display_name(folder_name):
     """Convert encoded folder name to readable project name.
 
@@ -1743,58 +1686,38 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     default=10,
     help="Maximum number of sessions to show (default: 10)",
 )
-@click.option(
-    "--process-name",
-    "process_name",
-    default=None,
-    help=(
-        "Process name to match (e.g. 'quirky-eager-fermat'). "
-        "Skips the interactive picker. "
-        'Use --process-name "$(basename $PWD)" from within a Cowork session.'
-    ),
-)
-def cowork_cmd(output, output_auto, gist, open_browser, limit, process_name):
+def cowork_cmd(output, output_auto, gist, open_browser, limit):
     """Select and convert a local Claude Cowork session to HTML."""
-    if process_name:
-        # Non-interactive mode: find session by processName (for in-session use)
-        selected = find_cowork_session_by_process_name(process_name)
-        if selected is None:
-            click.echo(f"No Cowork session found with process name: {process_name}")
-            click.echo(
-                "Ensure ~/Library/Application Support/Claude/ is in your userSelectedFolders."
-            )
-            return
-    else:
-        click.echo("Loading Cowork sessions...")
-        sessions = find_cowork_sessions(limit=limit)
+    click.echo("Loading Cowork sessions...")
+    sessions = find_cowork_sessions(limit=limit)
 
-        if not sessions:
-            click.echo("No Cowork sessions found.")
-            click.echo(
-                "Expected sessions in: ~/Library/Application Support/Claude/local-agent-mode-sessions/"
-            )
-            return
+    if not sessions:
+        click.echo("No Cowork sessions found.")
+        click.echo(
+            "Expected sessions in: ~/Library/Application Support/Claude/local-agent-mode-sessions/"
+        )
+        return
 
-        # Build choices for questionary
-        choices = []
-        for session in sessions:
-            mod_time = datetime.fromtimestamp(session["mtime"])
-            date_str = mod_time.strftime("%Y-%m-%d %H:%M")
-            title = session["title"]
-            if len(title) > 50:
-                title = title[:47] + "..."
-            folder = session["folders"][0] if session["folders"] else "(no folder)"
-            display = f"{title:50}  {date_str}  {folder}"
-            choices.append(questionary.Choice(title=display, value=session))
+    # Build choices for questionary
+    choices = []
+    for session in sessions:
+        mod_time = datetime.fromtimestamp(session["mtime"])
+        date_str = mod_time.strftime("%Y-%m-%d %H:%M")
+        title = session["title"]
+        if len(title) > 50:
+            title = title[:47] + "..."
+        folder = session["folders"][0] if session["folders"] else "(no folder)"
+        display = f"{title:50}  {date_str}  {folder}"
+        choices.append(questionary.Choice(title=display, value=session))
 
-        selected = questionary.select(
-            "Select a session to convert:",
-            choices=choices,
-        ).ask()
+    selected = questionary.select(
+        "Select a session to convert:",
+        choices=choices,
+    ).ask()
 
-        if selected is None:
-            click.echo("No session selected.")
-            return
+    if selected is None:
+        click.echo("No session selected.")
+        return
 
     session_file = selected["jsonl_path"]
 
